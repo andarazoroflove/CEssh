@@ -243,3 +243,28 @@ bool winsock_ce_get_local_info(char *name, size_t name_len, char *ip_str, size_t
     }
     return false;
 }
+
+uint32_t winsock_ce_resolve(const char *host, char *ip_str_out, size_t ip_str_len) {
+    if (!winsock_ce_init() || !host || host[0] == '\0') {
+        return INADDR_NONE;
+    }
+
+    unsigned long ip = INADDR_NONE;
+    if (fn_inet_addr) {
+        ip = fn_inet_addr(host);
+    }
+
+    if (ip == INADDR_NONE && fn_gethostbyname) {
+        struct hostent *he = fn_gethostbyname(host);
+        if (he && he->h_addr_list && he->h_addr_list[0]) {
+            memcpy(&ip, he->h_addr_list[0], 4);
+        }
+    }
+
+    if (ip != INADDR_NONE && ip_str_out && ip_str_len > 0) {
+        unsigned char *b = (unsigned char *)&ip;
+        snprintf(ip_str_out, ip_str_len, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    }
+
+    return (uint32_t)ip;
+}

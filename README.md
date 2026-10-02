@@ -56,13 +56,26 @@ Type 'help' for commands or 'ssh [user@]host[:port]' to connect.
 | Command | Description | Example |
 | :--- | :--- | :--- |
 | `ssh [user@]host[:port]` | Connect to remote SSH-2 server | `ssh root@192.168.1.50`<br>`ssh pi@raspberrypi.local:2222` |
-| `connect <host>` | Alias for `ssh` | `connect 10.0.0.1` |
-| `ping <host> [port]` | Test TCP reachability & connection latency | `ping 192.168.1.1 22` |
-| `ip` / `net` | Display Winsock status and local IP address | `ip` |
+| `ftp [user@]host[:port]` | Interactive FTP client (transfers locked to CEssh folder) | `ftp 192.168.1.50`<br>`ftp user@ftpserver.local` |
+| `ping <host> [count]` | Standard ICMP Ping (sends 4 echo packets, reports RTT & loss) | `ping 192.168.1.1`<br>`ping google.com 8` |
+| `tcpping <host> [port]` | TCP port reachability & latency probe | `tcpping 192.168.1.50 80` |
+| `ip` / `net` | Display Winsock status, local IP, and CEssh folder | `ip` |
 | `clear` / `cls` | Clear terminal grid buffer | `clear` |
 | `theme` | Toggle between high-contrast black-on-white and dark mode | `theme` |
 | `help` / `?` | Display list of supported commands | `help` |
 | `exit` / `quit` | Exit application | `exit` |
+
+### FTP Commands (`ftp> ` Prompt)
+When connected to an FTP server, CEssh operates in interactive FTP mode. **All transfers are strictly locked to the folder from which CEssh was launched** (e.g. `\Storage Card\CEssh\`):
+- `ls` / `dir [path]`: List remote directory contents.
+- `get <remote_file> [local_file]`: Download remote file directly into the `CEssh` folder.
+- `put <local_file> [remote_file]`: Upload file from the `CEssh` folder to the FTP server.
+- `cd <path>`: Change remote working directory.
+- `pwd`: Print remote working directory.
+- `binary` / `bin`: Enable 8-bit binary transfer mode (default).
+- `ascii`: Enable ASCII transfer mode.
+- `quote <cmd>`: Send raw FTP protocol commands.
+- `bye` / `quit` / `exit`: Close FTP connection and return to `?/` prompt.
 
 ### In-Session Keystrokes
 - **Keystrokes**: Normal alphanumeric keys, Enter, Backspace, Tab, and Esc are forwarded directly to the remote Linux shell.

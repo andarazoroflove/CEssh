@@ -4,12 +4,11 @@ set -e
 if ! command -v arm-mingw32ce-gcc &>/dev/null; then
     echo "arm-mingw32ce-gcc not found in host PATH; invoking via docker container..."
     docker run --rm -v "$(pwd):/work" -w /work 777shuang/docker-cegcc bash scripts/build_j720.sh
-    if [ ! -f "build/cessh-j720-StorageCard.zip" ]; then
-        if command -v zip &>/dev/null; then
-            (cd build && zip -r cessh-j720-StorageCard.zip "Storage Card")
-        elif command -v python3 &>/dev/null; then
-            python3 -c "import shutil; shutil.make_archive('build/cessh-j720-StorageCard', 'zip', 'build/Storage Card')"
-        fi
+    rm -f build/cessh-j720-StorageCard.zip
+    if command -v zip &>/dev/null; then
+        (cd build && zip -r cessh-j720-StorageCard.zip "Storage Card")
+    elif command -v python3 &>/dev/null; then
+        python3 -c "import shutil; shutil.make_archive('build/cessh-j720-StorageCard', 'zip', 'build/Storage Card')"
     fi
     exit $?
 fi
@@ -33,6 +32,8 @@ CC="arm-mingw32ce-gcc"
 SRCS_C="
 src/crt/freestanding.c
 src/net/winsock_ce.c
+src/net/ping.c
+src/net/ftp.c
 src/ui/font.c
 src/ui/terminal.c
 src/ui/win_main.c
@@ -122,20 +123,24 @@ Features:
 - Native Windows CE look and feel
 - Interactive '?/' command prompt
 - Modern SSH-2 client with Curve25519 ECDH, AES128-CTR, HMAC-SHA256
-- Full interactive remote Linux shell control (bash, htop, vi, nano, etc.)
+- Interactive FTP client (transfers locked to CEssh folder on Storage Card)
+- Standard ICMP Ping (4 echo packets with latency statistics)
 - Dynamic Winsock hooks for Orinoco Gold 802.11b Wi-Fi card
 
 Commands at '?/' prompt:
   ssh [user@]host[:port]  - Connect to SSH server (e.g. ssh root@192.168.1.50)
-  connect <host>          - Alias for ssh
-  ping <host> [port]      - Test network connectivity to host:port
+  ftp [user@]host[:port]  - Interactive FTP client (get/put/ls/cd/pwd)
+  ping <host> [count]     - Standard ICMP ping (default 4 echo packets)
+  tcpping <host> [port]   - TCP port connectivity test
   ip / net                - Show Winsock and network status
   clear                   - Clear screen
   theme                   - Toggle black-on-white / white-on-black theme
   help                    - Display command reference
   exit                    - Exit CEssh
 
-Tip: During an active SSH session, press Ctrl+] to disconnect and return to '?/'.
+Tips:
+- Press Ctrl+] during an SSH session to return to '?/'.
+- All FTP files are downloaded to or uploaded from \Storage Card\CEssh\.
 ================================================================================
 EOF
 

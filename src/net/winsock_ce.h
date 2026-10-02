@@ -16,5 +16,6 @@ int    winsock_ce_recv(SOCKET s, void *buf, int len, int timeout_ms);
 bool   winsock_ce_has_data(SOCKET s);
 void   winsock_ce_close(SOCKET s);
 bool   winsock_ce_get_local_info(char *name, size_t name_len, char *ip_str, size_t ip_len);
+uint32_t winsock_ce_resolve(const char *host, char *ip_str_out, size_t ip_str_len);
 
 #endif /* CESSH_WINSOCK_CE_H */
