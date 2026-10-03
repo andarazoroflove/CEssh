@@ -534,16 +534,50 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    uint8_t urep[256];
+    uint8_t urep[512];
     size_t urep_len = 0;
-    if (ssh_recv_packet(urep, sizeof(urep), &urep_len, 8000) <= 0) {
-        notify_out("Error: Authentication timed out.\r\n");
-        ssh2_disconnect();
-        return false;
+    DWORD t_auth_start = GetTickCount();
+    bool auth_done = false;
+
+    while (GetTickCount() - t_auth_start < 10000) {
+        urep_len = 0;
+        int r = ssh_recv_packet(urep, sizeof(urep), &urep_len, 2500);
+        if (r <= 0) continue;
+
+        if (urep[0] == SSH_MSG_USERAUTH_BANNER) {
+            ssh_buf_t bb;
+            ssh_buf_init_read(&bb, urep, urep_len);
+            uint8_t btype;
+            const uint8_t *bmsg = NULL;
+            size_t bmsg_len = 0;
+            ssh_get_u8(&bb, &btype);
+            if (ssh_get_string(&bb, &bmsg, &bmsg_len) && bmsg && bmsg_len > 0) {
+                char banner_buf[256];
+                size_t to_print = (bmsg_len < sizeof(banner_buf) - 3) ? bmsg_len : (sizeof(banner_buf) - 3);
+                memcpy(banner_buf, bmsg, to_print);
+                banner_buf[to_print] = '\0';
+                notify_out(banner_buf);
+                notify_out("\r\n");
+            }
+            continue;
+        } else if (urep[0] == SSH_MSG_DEBUG || urep[0] == SSH_MSG_IGNORE) {
+            continue;
+        } else if (urep[0] == SSH_MSG_USERAUTH_SUCCESS) {
+            auth_done = true;
+            break;
+        } else if (urep[0] == SSH_MSG_USERAUTH_FAILURE) {
+            notify_out("Error: Access denied (authentication failed).\r\n");
+            ssh2_disconnect();
+            return false;
+        } else if (urep[0] == SSH_MSG_DISCONNECT) {
+            notify_out("Error: Disconnected during authentication.\r\n");
+            ssh2_disconnect();
+            return false;
+        }
     }
 
-    if (urep[0] != SSH_MSG_USERAUTH_SUCCESS) {
-        notify_out("Error: Access denied (authentication failed).\r\n");
+    if (!auth_done) {
+        notify_out("Error: Authentication timed out or rejected.\r\n");
         ssh2_disconnect();
         return false;
     }
@@ -566,15 +600,64 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    uint8_t cconf[256];
+    uint8_t cconf[512];
     size_t cconf_len = 0;
-    if (ssh_recv_packet(cconf, sizeof(cconf), &cconf_len, 5000) <= 0) {
-        notify_out("Error: Failed to receive channel open confirmation.\r\n");
-        ssh2_disconnect();
-        return false;
+    bool channel_opened = false;
+    DWORD t_chan_start = GetTickCount();
+
+    while (GetTickCount() - t_chan_start < 10000) {
+        cconf_len = 0;
+        int r = ssh_recv_packet(cconf, sizeof(cconf), &cconf_len, 2000);
+        if (r <= 0) continue;
+
+        uint8_t msg_type = cconf[0];
+        if (msg_type == SSH_MSG_CHANNEL_OPEN_CONFIRMATION) {
+            channel_opened = true;
+            break;
+        } else if (msg_type == SSH_MSG_CHANNEL_OPEN_FAILURE) {
+            ssh_buf_t fail_b;
+            ssh_buf_init_read(&fail_b, cconf, cconf_len);
+            uint8_t f_type;
+            uint32_t f_chan, f_reason;
+            const uint8_t *f_desc = NULL;
+            size_t f_desc_len = 0;
+            ssh_get_u8(&fail_b, &f_type);
+            ssh_get_u32(&fail_b, &f_chan);
+            ssh_get_u32(&fail_b, &f_reason);
+            ssh_get_string(&fail_b, &f_desc, &f_desc_len);
+            char err_buf[256];
+            snprintf(err_buf, sizeof(err_buf), "Error: Session channel rejected by server (code %u: %.*s)\r\n",
+                     (unsigned)f_reason, (int)(f_desc_len < 160 ? f_desc_len : 160),
+                     f_desc ? (const char *)f_desc : "rejected");
+            notify_out(err_buf);
+            ssh2_disconnect();
+            return false;
+        } else if (msg_type == SSH_MSG_GLOBAL_REQUEST) {
+            /* OpenSSH often sends hostkeys-00@openssh.com here */
+            ssh_buf_t gb;
+            ssh_buf_init_read(&gb, cconf, cconf_len);
+            uint8_t gtype;
+            const uint8_t *req_name = NULL;
+            size_t req_len = 0;
+            uint8_t want_reply = 0;
+            ssh_get_u8(&gb, &gtype);
+            if (ssh_get_string(&gb, &req_name, &req_len) && ssh_get_u8(&gb, &want_reply)) {
+                if (want_reply) {
+                    uint8_t fail = SSH_MSG_REQUEST_FAILURE;
+                    ssh_send_packet(&fail, 1);
+                }
+            }
+        } else if (msg_type == SSH_MSG_DEBUG || msg_type == SSH_MSG_IGNORE) {
+            continue;
+        } else if (msg_type == SSH_MSG_DISCONNECT) {
+            notify_out("Error: Server disconnected during session channel open.\r\n");
+            ssh2_disconnect();
+            return false;
+        }
     }
-    if (cconf[0] != SSH_MSG_CHANNEL_OPEN_CONFIRMATION) {
-        notify_out("Error: Session channel rejected by server.\r\n");
+
+    if (!channel_opened) {
+        notify_out("Error: Timed out waiting for channel confirmation.\r\n");
         ssh2_disconnect();
         return false;
     }
@@ -592,7 +675,7 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     s_client_chan = my_chan;
     s_server_chan = server_chan;
 
-    /* 15. Request PTY (vt100, 80x24) */
+    /* 15. Request PTY (vt100, 80x21) */
     uint8_t pty_req[128];
     ssh_buf_init(&ob, pty_req, sizeof(pty_req));
     ssh_put_u8(&ob, SSH_MSG_CHANNEL_REQUEST);
@@ -603,13 +686,31 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     ssh_put_u32(&ob, s_term_cols);
     ssh_put_u32(&ob, s_term_rows);
     ssh_put_u32(&ob, 640);
-    ssh_put_u32(&ob, 240);
+    ssh_put_u32(&ob, 214);
     ssh_put_str(&ob, "");
     ssh_send_packet(ob.data, ob.len);
 
-    uint8_t r_pty[128];
-    size_t r_pty_len = 0;
-    ssh_recv_packet(r_pty, sizeof(r_pty), &r_pty_len, 3000);
+    /* Wait for PTY response (handle global requests/debug if any) */
+    DWORD t_pty = GetTickCount();
+    while (GetTickCount() - t_pty < 3000) {
+        uint8_t r_pty[128];
+        size_t r_pty_len = 0;
+        if (ssh_recv_packet(r_pty, sizeof(r_pty), &r_pty_len, 1000) <= 0) continue;
+        if (r_pty[0] == SSH_MSG_GLOBAL_REQUEST) {
+            ssh_buf_t gb;
+            ssh_buf_init_read(&gb, r_pty, r_pty_len);
+            uint8_t gt; const uint8_t *rn; size_t rl; uint8_t wr = 0;
+            ssh_get_u8(&gb, &gt);
+            if (ssh_get_string(&gb, &rn, &rl) && ssh_get_u8(&gb, &wr) && wr) {
+                uint8_t fail = SSH_MSG_REQUEST_FAILURE;
+                ssh_send_packet(&fail, 1);
+            }
+            continue;
+        }
+        if (r_pty[0] == SSH_MSG_CHANNEL_SUCCESS || r_pty[0] == SSH_MSG_CHANNEL_FAILURE) {
+            break;
+        }
+    }
 
     /* 16. Request Shell */
     uint8_t shell_req[64];
@@ -620,9 +721,26 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     ssh_put_u8(&ob, 1);
     ssh_send_packet(ob.data, ob.len);
 
-    uint8_t r_sh[128];
-    size_t r_sh_len = 0;
-    ssh_recv_packet(r_sh, sizeof(r_sh), &r_sh_len, 3000);
+    DWORD t_sh = GetTickCount();
+    while (GetTickCount() - t_sh < 3000) {
+        uint8_t r_sh[128];
+        size_t r_sh_len = 0;
+        if (ssh_recv_packet(r_sh, sizeof(r_sh), &r_sh_len, 1000) <= 0) continue;
+        if (r_sh[0] == SSH_MSG_GLOBAL_REQUEST) {
+            ssh_buf_t gb;
+            ssh_buf_init_read(&gb, r_sh, r_sh_len);
+            uint8_t gt; const uint8_t *rn; size_t rl; uint8_t wr = 0;
+            ssh_get_u8(&gb, &gt);
+            if (ssh_get_string(&gb, &rn, &rl) && ssh_get_u8(&gb, &wr) && wr) {
+                uint8_t fail = SSH_MSG_REQUEST_FAILURE;
+                ssh_send_packet(&fail, 1);
+            }
+            continue;
+        }
+        if (r_sh[0] == SSH_MSG_CHANNEL_SUCCESS || r_sh[0] == SSH_MSG_CHANNEL_FAILURE) {
+            break;
+        }
+    }
 
     s_status = SSH2_STATUS_CONNECTED;
     notify_out("\r\n[SSH-2 Session Established. Press Ctrl+] to disconnect]\r\n\r\n");

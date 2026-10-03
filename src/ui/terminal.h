@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 #define TERM_COLS 80
-#define TERM_ROWS 24
+#define TERM_ROWS 21
 
 /* Color Palette */
 #define COLOR_WHITE   0x00FFFFFF
@@ -37,6 +37,11 @@ void term_set_bg(uint32_t color);
 void term_toggle_invert(void);
 bool term_is_inverted(void);
 void term_set_cursor_visible(bool visible);
+
+void term_set_watermark(bool enabled);
+bool term_get_watermark(void);
+void term_set_watermark_text(const char *text);
+void term_render_cell(int col, int row, char ch, uint32_t fg, uint32_t bg, uint8_t attr);
 
 void term_render(uint32_t *framebuffer, int width, int height, int pitch_pixels);
 

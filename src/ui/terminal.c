@@ -45,7 +45,67 @@ static const uint32_t s_ansi_colors[16] = {
     0x00FFFFFF  /* 15: White */
 };
 
+static bool s_watermark_enabled = true;
+static char s_watermark_title[80] = "CEssh Suite 0.9a";
+
+void term_set_watermark(bool enabled) {
+    s_watermark_enabled = enabled;
+}
+
+bool term_get_watermark(void) {
+    return s_watermark_enabled;
+}
+
+void term_set_watermark_text(const char *text) {
+    if (text) {
+        strncpy(s_watermark_title, text, sizeof(s_watermark_title) - 1);
+        s_watermark_title[sizeof(s_watermark_title) - 1] = '\0';
+    }
+}
+
+void term_render_cell(int col, int row, char ch, uint32_t fg, uint32_t bg, uint8_t attr) {
+    if (col < 0 || col >= TERM_COLS || row < 0 || row >= TERM_ROWS) return;
+    s_grid[row][col].ch = ch;
+    s_grid[row][col].fg = fg;
+    s_grid[row][col].bg = bg;
+    s_grid[row][col].attr = attr;
+}
+
+static void draw_watermark(void) {
+    if (!s_watermark_enabled) return;
+    /* Row 0: Watermark title, e.g. "CEssh Suite 0.9a" */
+    for (int c = 0; c < TERM_COLS; c++) {
+        s_grid[0][c].ch = ' ';
+        s_grid[0][c].fg = COLOR_DKGRAY;
+        s_grid[0][c].bg = COLOR_LTGRAY;
+        s_grid[0][c].attr = 1; /* bold */
+    }
+    size_t wlen = strlen(s_watermark_title);
+    int pad = (TERM_COLS > (int)wlen) ? (TERM_COLS - (int)wlen) / 2 : 2;
+    for (size_t i = 0; i < wlen && (pad + (int)i) < TERM_COLS; i++) {
+        s_grid[0][pad + i].ch = s_watermark_title[i];
+    }
+
+    /* Row 1: Line of dashes */
+    for (int c = 0; c < TERM_COLS; c++) {
+        s_grid[1][c].ch = '-';
+        s_grid[1][c].fg = COLOR_GRAY;
+        s_grid[1][c].bg = COLOR_WHITE;
+        s_grid[1][c].attr = 0;
+    }
+}
+
 static void scroll_up(void) {
+    if (s_watermark_enabled) {
+        memmove(&s_grid[2][0], &s_grid[3][0], sizeof(term_cell_t) * TERM_COLS * (TERM_ROWS - 3));
+        for (int col = 0; col < TERM_COLS; col++) {
+            s_grid[TERM_ROWS - 1][col].ch = ' ';
+            s_grid[TERM_ROWS - 1][col].fg = s_cur_fg;
+            s_grid[TERM_ROWS - 1][col].bg = s_cur_bg;
+            s_grid[TERM_ROWS - 1][col].attr = 0;
+        }
+        return;
+    }
     memmove(&s_grid[0][0], &s_grid[1][0], sizeof(term_cell_t) * TERM_COLS * (TERM_ROWS - 1));
     for (int col = 0; col < TERM_COLS; col++) {
         s_grid[TERM_ROWS - 1][col].ch = ' ';
@@ -72,8 +132,14 @@ void term_clear(void) {
             s_grid[r][c].attr = 0;
         }
     }
-    s_cursor_col = 0;
-    s_cursor_row = 0;
+    if (s_watermark_enabled) {
+        draw_watermark();
+        s_cursor_col = 0;
+        s_cursor_row = 2;
+    } else {
+        s_cursor_col = 0;
+        s_cursor_row = 0;
+    }
     s_parser_state = STATE_NORMAL;
 }
 
@@ -106,9 +172,10 @@ void term_get_cursor(int *col, int *row) {
 }
 
 void term_set_cursor(int col, int row) {
+    int min_row = s_watermark_enabled ? 2 : 0;
     if (col < 0) col = 0;
     if (col >= TERM_COLS) col = TERM_COLS - 1;
-    if (row < 0) row = 0;
+    if (row < min_row) row = min_row;
     if (row >= TERM_ROWS) row = TERM_ROWS - 1;
     s_cursor_col = col;
     s_cursor_row = row;
