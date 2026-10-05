@@ -1,4 +1,6 @@
 build/wince/
+build/palmos/
+build/axim/
 build/armv4_patch
 *.o
 *.d

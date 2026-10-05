@@ -5,11 +5,15 @@
 #include <ctype.h>
 
 #include "prompt.h"
+#include "note.h"
+#include "tar.h"
+#include "path_util.h"
 #include "../ui/terminal.h"
 #include "../ssh/ssh2.h"
 #include "../net/winsock_ce.h"
 #include "../net/ping.h"
 #include "../net/ftp.h"
+#include "../net/chat_cli.h"
 
 typedef enum {
     MODE_PROMPT = 0,
@@ -79,7 +83,12 @@ static void hist_add(const char *cmd) {
 static void print_help(void) {
     term_puts("Available Commands:\r\n");
     term_puts("  ssh [user@]host[:port]  - Connect to remote SSH-2 server\r\n");
-    term_puts("  ftp [user@]host[:port]  - Interactive FTP (transfers to CEssh folder)\r\n");
+    term_puts("  ftp [user@]host[:port]  - Interactive FTP (transfers to usr/ folder)\r\n");
+    term_puts("  chat [server] [nick]    - Interactive IRC chat client\r\n");
+    term_puts("  note [filename]         - Full-screen text editor (stored in usr/)\r\n");
+    term_puts("  tarc <out.tar> <files>  - Create POSIX tar archive\r\n");
+    term_puts("  tarx <archive.tar>      - Extract POSIX tar archive\r\n");
+    term_puts("  ls / dir [pattern]      - List files in application usr/ folder\r\n");
     term_puts("  ping <host> [count]     - Standard ICMP Ping (default 4 echo packets)\r\n");
     term_puts("  tcpping <host> [port]   - TCP port reachability test\r\n");
     term_puts("  ip / net                - Show Winsock & local IP address\r\n");
@@ -89,7 +98,7 @@ static void print_help(void) {
     term_puts("  exit / quit             - Exit CEssh\r\n\r\n");
     term_puts("Tips:\r\n");
     term_puts("  - During SSH session, press Ctrl+] to disconnect.\r\n");
-    term_puts("  - FTP files are strictly stored in / read from the CEssh folder.\r\n\r\n");
+    term_puts("  - File transfers, tar, and note are strictly stored in usr/ folder.\r\n\r\n");
 }
 
 static void print_ftp_help(void) {
@@ -406,6 +415,77 @@ static void execute_command(char *cmd) {
         term_toggle_invert();
         term_clear();
         print_prompt();
+    } else if (strncmp(cmd, "note ", 5) == 0) {
+        char *arg = cmd + 5;
+        while (*arg == ' ') arg++;
+        note_run(arg);
+        term_set_watermark(true);
+        term_clear();
+        print_prompt();
+    } else if (strcmp(cmd, "note") == 0) {
+        note_run(NULL);
+        term_set_watermark(true);
+        term_clear();
+        print_prompt();
+    } else if (strncmp(cmd, "chat ", 5) == 0) {
+        char *arg = cmd + 5;
+        while (*arg == ' ') arg++;
+        char *sp = strchr(arg, ' ');
+        if (sp) {
+            *sp = '\0';
+            char *nick = sp + 1;
+            while (*nick == ' ') nick++;
+            chat_cli_run(arg, nick);
+        } else {
+            chat_cli_run(arg, NULL);
+        }
+        term_set_watermark(true);
+        term_clear();
+        print_prompt();
+    } else if (strcmp(cmd, "chat") == 0 || strcmp(cmd, "irc") == 0) {
+        chat_cli_run(NULL, NULL);
+        term_set_watermark(true);
+        term_clear();
+        print_prompt();
+    } else if (strncmp(cmd, "tarc ", 5) == 0) {
+        char *argv[16];
+        int argc = 0;
+        argv[argc++] = "tarc";
+        char *p = cmd + 5;
+        while (*p && argc < 16) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            argv[argc++] = p;
+            while (*p && *p != ' ') p++;
+            if (*p) *p++ = '\0';
+        }
+        tar_create_cmd(argc, argv);
+        print_prompt();
+    } else if (strcmp(cmd, "tarc") == 0) {
+        term_puts("Usage: tarc <archive.tar> <file1> [file2 ...]\r\n");
+        print_prompt();
+    } else if (strncmp(cmd, "tarx ", 5) == 0) {
+        char *argv[4];
+        int argc = 0;
+        argv[argc++] = "tarx";
+        char *p = cmd + 5;
+        while (*p && argc < 4) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            argv[argc++] = p;
+            while (*p && *p != ' ') p++;
+            if (*p) *p++ = '\0';
+        }
+        tar_extract_cmd(argc, argv);
+        print_prompt();
+    } else if (strcmp(cmd, "tarx") == 0) {
+        term_puts("Usage: tarx <archive.tar>\r\n");
+        print_prompt();
+    } else if (strncmp(cmd, "ls", 2) == 0 || strncmp(cmd, "dir", 3) == 0) {
+        char *p = cmd + (cmd[0] == 'l' ? 2 : 3);
+        while (*p == ' ') p++;
+        path_list_usr(*p ? p : NULL);
+        print_prompt();
     } else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         print_help();
         print_prompt();
@@ -433,10 +513,10 @@ void prompt_init(void) {
     term_set_bg(COLOR_WHITE);
 
     term_puts("================================================================================\r\n");
-    term_puts("  CEssh v1.1.0 (Windows CE 3.0 / HPC 2000)\r\n");
-    term_puts("  HP Jornada 720 StrongARM SA-1110 SSH-2, FTP & ICMP Ping Terminal\r\n");
+    term_puts("  CEssh Suite v1.1.0\r\n");
+    term_puts("  Terminal & Remote Tools for Handheld & Pocket PCs\r\n");
     term_puts("================================================================================\r\n");
-    term_puts("Type 'help' for commands, 'ssh user@host', 'ftp host', or 'ping host'.\r\n\r\n");
+    term_puts("Type 'help' for commands, 'ssh', 'ftp', 'chat', 'note', 'ping', 'tarc'/'tarx'.\r\n\r\n");
 
     print_prompt();
 }

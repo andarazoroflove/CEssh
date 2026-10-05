@@ -34,12 +34,16 @@ src/crt/freestanding.c
 src/net/winsock_ce.c
 src/net/ping.c
 src/net/ftp.c
+src/net/chat_cli.c
 src/ui/font.c
 src/ui/terminal.c
 src/ui/win_main.c
 src/ssh/ssh_buf.c
 src/ssh/ssh_crypto.c
 src/ssh/ssh2.c
+src/cli/path_util.c
+src/cli/note.c
+src/cli/tar.c
 src/cli/prompt.c
 "
 
@@ -105,8 +109,10 @@ echo "AUDIT PASSED: ZERO bx/blx instructions found in build/cessh.exe! 100% Stro
 echo "--> Auditing PE imports in build/cessh.exe..."
 arm-mingw32ce-objdump -p build/cessh.exe | grep -E 'DLL Name|GetProcAddress|_ecvt|_fcvt|_isnan|fputc|GetCPInfo' || true
 
-mkdir -p "build/Storage Card/CEssh"
+mkdir -p "build/Storage Card/CEssh/usr"
 cp build/cessh.exe "build/Storage Card/CEssh/"
+cp build/cessh.exe "build/Storage Card/CEssh/cessh-j720.exe"
+cp build/cessh.exe "build/cessh-j720.exe"
 
 cat << 'EOF' > "build/Storage Card/CEssh/README.txt"
 ================================================================================

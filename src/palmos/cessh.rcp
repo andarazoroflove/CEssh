@@ -1,0 +1,36 @@
+#include "cessh_res.h"
+
+APPLICATIONICONNAME ID 1000 "CEssh"
+
+MENU ID MainMenuBarID
+BEGIN
+    PULLDOWN "Session"
+    BEGIN
+        MENUITEM "Disconnect" ID MenuOptsDisconnect "D"
+        MENUITEM "Clear Screen" ID MenuOptsClear "C"
+        MENUITEM "About CEssh" ID MenuOptsAbout "A"
+    END
+END
+
+FORM ID MainFormID AT (0 0 160 160)
+NOFRAME
+USABLE
+MENUID MainMenuBarID
+BEGIN
+END
+
+ALERT ID RomIncompatibleAlert
+CONFIRMATION
+BEGIN
+    TITLE "System Incompatible"
+    MESSAGE "CEssh requires Palm OS 4.0 or higher."
+    BUTTONS "OK"
+END
+
+ALERT ID AboutAlert
+CONFIRMATION
+BEGIN
+    TITLE "About CEssh"
+    MESSAGE "CEssh v0.9a for Palm OS\nPalm T|X & Garnet Edition\nSSH-2 / Curve25519 / AES-CTR\n(C) 2026 Eschaton Labs"
+    BUTTONS "OK"
+END

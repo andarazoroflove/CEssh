@@ -1,4 +1,13 @@
+#ifdef PALMOS
+#include <PalmOS.h>
+#include <stdint.h>
+#include <stddef.h>
+#else
 #include <windows.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#endif
 #include <string.h>
 
 #include "ssh_crypto.h"
@@ -6,20 +15,27 @@
 static uint64_t s_rng_state = 0x9e3779b97f4a7c15ULL;
 
 void ssh_random_bytes(uint8_t *buf, size_t len) {
+    size_t i;
     if (s_rng_state == 0x9e3779b97f4a7c15ULL) {
+#ifdef PALMOS
+        s_rng_state ^= ((uint64_t)TimGetSeconds() << 32) | (uint64_t)TimGetTicks();
+        s_rng_state ^= (uintptr_t)buf;
+#else
         LARGE_INTEGER qpc;
         if (QueryPerformanceCounter(&qpc)) {
             s_rng_state ^= (uint64_t)qpc.QuadPart;
         }
         s_rng_state ^= ((uint64_t)GetTickCount() << 32) | (uintptr_t)buf;
+#endif
     }
 
-    for (size_t i = 0; i < len; i++) {
+    for (i = 0; i < len; i++) {
+        uint64_t val;
         /* 64-bit Xorshift* PRNG */
         s_rng_state ^= s_rng_state >> 12;
         s_rng_state ^= s_rng_state << 25;
         s_rng_state ^= s_rng_state >> 27;
-        uint64_t val = s_rng_state * 0x2545F4914F6CDD1DULL;
+        val = s_rng_state * 0x2545F4914F6CDD1DULL;
         buf[i] = (uint8_t)(val >> 32);
     }
 }
@@ -27,7 +43,8 @@ void ssh_random_bytes(uint8_t *buf, size_t len) {
 void br_aes_big_encrypt(unsigned num_rounds, const uint32_t *skey, void *data);
 
 static void inc_ctr128(uint8_t *ctr) {
-    for (int i = 15; i >= 0; i--) {
+    int i;
+    for (i = 15; i >= 0; i--) {
         if (++ctr[i] != 0) break;
     }
 }
@@ -39,7 +56,8 @@ void ssh_cipher_init(ssh_cipher_ctx_t *c, const uint8_t *key, const uint8_t *iv)
 }
 
 void ssh_cipher_crypt(ssh_cipher_ctx_t *c, uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
+    size_t i;
+    for (i = 0; i < len; i++) {
         if (c->pad_idx >= 16) {
             memcpy(c->pad, c->ctr, 16);
             br_aes_big_encrypt(c->key.num_rounds, c->key.skey, c->pad);
@@ -56,9 +74,9 @@ void ssh_mac_init(ssh_mac_ctx_t *m, const uint8_t *key, size_t key_len) {
 }
 
 void ssh_mac_compute(ssh_mac_ctx_t *m, uint32_t seq, const uint8_t *data, size_t len, uint8_t *out_tag) {
+    uint8_t seq_bytes[4];
     br_hmac_init(&m->hctx, &m->kctx, 0);
 
-    uint8_t seq_bytes[4];
     seq_bytes[0] = (uint8_t)(seq >> 24);
     seq_bytes[1] = (uint8_t)(seq >> 16);
     seq_bytes[2] = (uint8_t)(seq >> 8);
@@ -76,27 +94,31 @@ void ssh_kdf(const uint8_t *k, size_t k_len,
              uint8_t *out, size_t out_len)
 {
     br_sha256_context ctx;
+    uint8_t digest[32];
+    size_t copy_first;
+    size_t generated;
+
     br_sha256_init(&ctx);
     br_sha256_update(&ctx, k, k_len);
     br_sha256_update(&ctx, h, h_len);
     br_sha256_update(&ctx, &x, 1);
     br_sha256_update(&ctx, session_id, session_id_len);
 
-    uint8_t digest[32];
     br_sha256_out(&ctx, digest);
 
-    size_t copy_first = (out_len < 32) ? out_len : 32;
+    copy_first = (out_len < 32) ? out_len : 32;
     memcpy(out, digest, copy_first);
 
-    size_t generated = copy_first;
+    generated = copy_first;
     while (generated < out_len) {
+        size_t to_copy;
         br_sha256_init(&ctx);
         br_sha256_update(&ctx, k, k_len);
         br_sha256_update(&ctx, h, h_len);
         br_sha256_update(&ctx, digest, 32);
         br_sha256_out(&ctx, digest);
 
-        size_t to_copy = out_len - generated;
+        to_copy = out_len - generated;
         if (to_copy > 32) to_copy = 32;
         memcpy(out + generated, digest, to_copy);
         generated += to_copy;

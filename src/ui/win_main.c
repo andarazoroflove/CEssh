@@ -10,12 +10,13 @@
 #include "../cli/prompt.h"
 #include "../ssh/ssh2.h"
 #include "../net/winsock_ce.h"
+#include "../net/ftp.h"
 
-#define SCREEN_W 640
-#define SCREEN_H_MAX 240
+#define SCREEN_W_MAX 640
+#define SCREEN_H_MAX 640
 #define SCREEN_H_DEFAULT 214
 
-static int    s_screen_w = SCREEN_W;
+static int    s_screen_w = 640;
 static int    s_screen_h = SCREEN_H_DEFAULT;
 
 static HWND   s_hwnd = NULL;
@@ -28,7 +29,7 @@ static bool   s_dib_bottom_up = false;
 static bool   s_is_555 = false;
 static bool   s_is_24bpp = false;
 
-static uint32_t s_backbuffer[SCREEN_W * SCREEN_H_MAX];
+static uint32_t s_backbuffer[SCREEN_W_MAX * SCREEN_H_MAX];
 static bool   s_cursor_blink_state = true;
 static DWORD  s_last_blink_tick = 0;
 static volatile bool s_abort_flag = false;
@@ -139,7 +140,7 @@ void flip_screen(void) {
     if (!s_hwnd || !s_hdc_mem || !s_dib_bits) return;
 
     /* 1. Render terminal grid into 32bpp backbuffer */
-    term_render(s_backbuffer, s_screen_w, s_screen_h, SCREEN_W);
+    term_render(s_backbuffer, s_screen_w, s_screen_h, s_screen_w);
 
     /* 2. Convert to DIBSection memory */
     if (s_is_24bpp) {
@@ -147,7 +148,7 @@ void flip_screen(void) {
         for (int y = 0; y < s_screen_h; y++) {
             int dy = s_dib_bottom_up ? (s_screen_h - 1 - y) : y;
             uint8_t *row = dst + (dy * s_screen_w * 3);
-            const uint32_t *src = s_backbuffer + (y * SCREEN_W);
+            const uint32_t *src = s_backbuffer + (y * s_screen_w);
             for (int x = 0; x < s_screen_w; x++) {
                 uint32_t c = src[x];
                 row[x * 3 + 0] = (uint8_t)(c & 0xFF);         /* B */
@@ -160,7 +161,7 @@ void flip_screen(void) {
         for (int y = 0; y < s_screen_h; y++) {
             int dy = s_dib_bottom_up ? (s_screen_h - 1 - y) : y;
             uint16_t *row = dst + (dy * s_screen_w);
-            const uint32_t *src = s_backbuffer + (y * SCREEN_W);
+            const uint32_t *src = s_backbuffer + (y * s_screen_w);
             if (s_is_555) {
                 for (int x = 0; x < s_screen_w; x++) {
                     uint32_t c = src[x];
@@ -304,22 +305,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLin
 
     RegisterClass(&wc);
 
-    /* Determine desktop work area so CEssh ends above the taskbar */
+    /* Determine desktop work area so CEssh ends above the taskbar/SIP */
     RECT rcWork;
-    if (SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0) && rcWork.bottom > rcWork.top && rcWork.bottom <= 240) {
+    if (SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0) && rcWork.bottom > rcWork.top) {
         s_screen_w = rcWork.right - rcWork.left;
         s_screen_h = rcWork.bottom - rcWork.top;
-        if (s_screen_h > SCREEN_H_DEFAULT) s_screen_h = SCREEN_H_DEFAULT;
     } else {
-        s_screen_w = SCREEN_W;
-        s_screen_h = SCREEN_H_DEFAULT;
+        s_screen_w = GetSystemMetrics(SM_CXSCREEN);
+        s_screen_h = GetSystemMetrics(SM_CYSCREEN);
+        if (s_screen_w <= 0) s_screen_w = 640;
+        if (s_screen_h <= 0) s_screen_h = SCREEN_H_DEFAULT;
     }
+    if (s_screen_w > SCREEN_W_MAX) s_screen_w = SCREEN_W_MAX;
+    if (s_screen_h > SCREEN_H_MAX) s_screen_h = SCREEN_H_MAX;
 
-    /* HP Jornada 720 terminal window docked cleanly above taskbar */
+    /* Dynamic terminal rows and columns based on 8x10 font */
+    term_set_size(s_screen_w / 8, s_screen_h / 10);
+
+    /* Terminal window docked cleanly above taskbar */
     s_hwnd = CreateWindowEx(
         0,
         szClassName,
-        L"CEssh - SSH-2 Terminal for HP Jornada 720",
+        L"CEssh Terminal",
         WS_POPUP | WS_VISIBLE,
         0, 0, s_screen_w, s_screen_h,
         NULL, NULL, hInstance, NULL

@@ -2,8 +2,16 @@
 #define CESSH_SSH2_H
 
 #include <stdint.h>
-#include <stdbool.h>
 #include <stddef.h>
+
+#ifdef PALMOS
+#include <PalmOS.h>
+#ifndef bool
+#define bool Boolean
+#endif
+#else
+#include <stdbool.h>
+#endif
 
 typedef enum {
     SSH2_STATUS_DISCONNECTED = 0,

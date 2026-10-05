@@ -5,7 +5,22 @@
 #include "terminal.h"
 #include "font.h"
 
-static term_cell_t s_grid[TERM_ROWS][TERM_COLS];
+static term_cell_t s_grid[TERM_MAX_ROWS][TERM_MAX_COLS];
+static int s_term_cols = 80;
+static int s_term_rows = 24;
+
+int term_get_cols(void) { return s_term_cols; }
+int term_get_rows(void) { return s_term_rows; }
+
+void term_set_size(int cols, int rows) {
+    if (cols < 20) cols = 20;
+    if (cols > TERM_MAX_COLS) cols = TERM_MAX_COLS;
+    if (rows < 10) rows = 10;
+    if (rows > TERM_MAX_ROWS) rows = TERM_MAX_ROWS;
+    s_term_cols = cols;
+    s_term_rows = rows;
+    term_clear();
+}
 static int s_cursor_col = 0;
 static int s_cursor_row = 0;
 static uint32_t s_cur_fg = COLOR_BLACK;
@@ -97,21 +112,25 @@ static void draw_watermark(void) {
 
 static void scroll_up(void) {
     if (s_watermark_enabled) {
-        memmove(&s_grid[2][0], &s_grid[3][0], sizeof(term_cell_t) * TERM_COLS * (TERM_ROWS - 3));
-        for (int col = 0; col < TERM_COLS; col++) {
-            s_grid[TERM_ROWS - 1][col].ch = ' ';
-            s_grid[TERM_ROWS - 1][col].fg = s_cur_fg;
-            s_grid[TERM_ROWS - 1][col].bg = s_cur_bg;
-            s_grid[TERM_ROWS - 1][col].attr = 0;
+        if (s_term_rows > 3) {
+            memmove(&s_grid[2][0], &s_grid[3][0], sizeof(term_cell_t) * TERM_MAX_COLS * (s_term_rows - 3));
+        }
+        for (int col = 0; col < s_term_cols; col++) {
+            s_grid[s_term_rows - 1][col].ch = ' ';
+            s_grid[s_term_rows - 1][col].fg = s_cur_fg;
+            s_grid[s_term_rows - 1][col].bg = s_cur_bg;
+            s_grid[s_term_rows - 1][col].attr = 0;
         }
         return;
     }
-    memmove(&s_grid[0][0], &s_grid[1][0], sizeof(term_cell_t) * TERM_COLS * (TERM_ROWS - 1));
-    for (int col = 0; col < TERM_COLS; col++) {
-        s_grid[TERM_ROWS - 1][col].ch = ' ';
-        s_grid[TERM_ROWS - 1][col].fg = s_cur_fg;
-        s_grid[TERM_ROWS - 1][col].bg = s_cur_bg;
-        s_grid[TERM_ROWS - 1][col].attr = 0;
+    if (s_term_rows > 1) {
+        memmove(&s_grid[0][0], &s_grid[1][0], sizeof(term_cell_t) * TERM_MAX_COLS * (s_term_rows - 1));
+    }
+    for (int col = 0; col < s_term_cols; col++) {
+        s_grid[s_term_rows - 1][col].ch = ' ';
+        s_grid[s_term_rows - 1][col].fg = s_cur_fg;
+        s_grid[s_term_rows - 1][col].bg = s_cur_bg;
+        s_grid[s_term_rows - 1][col].attr = 0;
     }
 }
 

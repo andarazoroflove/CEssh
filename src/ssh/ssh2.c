@@ -1,13 +1,40 @@
+#ifdef PALMOS
+#include <PalmOS.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../palmos/palmos_net.h"
+#define SOCKET         NetSocketRef
+#ifndef INVALID_SOCKET
+#define INVALID_SOCKET (-1)
+#endif
+#define sock_connect   palmos_net_connect
+#define sock_send      palmos_net_send
+#define sock_recv      palmos_net_recv
+#define sock_has_data  palmos_net_has_data
+#define sock_close     palmos_net_close
+#define get_tick_ms()  palmos_get_tick_ms()
+#define sprintf        StrPrintF
+#else
 #include <windows.h>
 #include <winsock2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../net/winsock_ce.h"
+#define sock_connect   winsock_ce_connect
+#define sock_send      winsock_ce_send
+#define sock_recv      winsock_ce_recv
+#define sock_has_data  winsock_ce_has_data
+#define sock_close     winsock_ce_close
+#define get_tick_ms()  GetTickCount()
+#endif
 
 #include "ssh2.h"
 #include "ssh_buf.h"
 #include "ssh_crypto.h"
-#include "../net/winsock_ce.h"
 
 /* SSH-2 Protocol Constants */
 #define SSH_MSG_DISCONNECT                1
@@ -95,7 +122,7 @@ void ssh2_disconnect(void) {
             ssh_put_str(&db, "");
             /* Best-effort unencrypted/encrypted send */
         }
-        winsock_ce_close(s_sock);
+        sock_close(s_sock);
         s_sock = INVALID_SOCKET;
     }
     s_status = SSH2_STATUS_DISCONNECTED;
@@ -105,19 +132,26 @@ void ssh2_disconnect(void) {
 }
 
 static int ssh_send_packet(const uint8_t *payload, size_t payload_len) {
+    static uint8_t raw_buf[4096];
+    size_t block_size;
+    size_t rem;
+    size_t pad_len;
+    uint32_t packet_len;
+    size_t total_unencrypted;
+    uint8_t mac_tag[32];
+    int ret;
+
     if (s_sock == INVALID_SOCKET) return -1;
 
-    static uint8_t raw_buf[4096];
-    size_t block_size = s_encrypted ? 16 : 8;
-
-    size_t rem = (5 + payload_len) % block_size;
-    size_t pad_len = (rem == 0) ? block_size : (block_size - rem);
+    block_size = s_encrypted ? 16 : 8;
+    rem = (5 + payload_len) % block_size;
+    pad_len = (rem == 0) ? block_size : (block_size - rem);
     if (pad_len < 4) {
         pad_len += block_size;
     }
 
-    uint32_t packet_len = (uint32_t)(1 + payload_len + pad_len);
-    size_t total_unencrypted = 4 + packet_len;
+    packet_len = (uint32_t)(1 + payload_len + pad_len);
+    total_unencrypted = 4 + packet_len;
     if (total_unencrypted + 32 > sizeof(raw_buf)) {
         return -1;
     }
@@ -131,7 +165,6 @@ static int ssh_send_packet(const uint8_t *payload, size_t payload_len) {
     memcpy(raw_buf + 5, payload, payload_len);
     ssh_random_bytes(raw_buf + 5 + payload_len, pad_len);
 
-    uint8_t mac_tag[32];
     if (s_encrypted) {
         ssh_mac_compute(&s_mac_send, s_send_seq, raw_buf, total_unencrypted, mac_tag);
         ssh_cipher_crypt(&s_cipher_send, raw_buf, total_unencrypted);
@@ -139,11 +172,11 @@ static int ssh_send_packet(const uint8_t *payload, size_t payload_len) {
 
     s_send_seq++;
 
-    int ret = winsock_ce_send(s_sock, raw_buf, (int)total_unencrypted);
+    ret = sock_send(s_sock, raw_buf, (int)total_unencrypted);
     if (ret <= 0) return ret;
 
     if (s_encrypted) {
-        ret = winsock_ce_send(s_sock, mac_tag, 32);
+        ret = sock_send(s_sock, mac_tag, 32);
         if (ret <= 0) return ret;
     }
 
@@ -152,16 +185,18 @@ static int ssh_send_packet(const uint8_t *payload, size_t payload_len) {
 
 static int recv_all(uint8_t *dst, size_t needed, uint32_t timeout_ms) {
     size_t received = 0;
-    DWORD start_time = GetTickCount();
+    uint32_t start_time = get_tick_ms();
+    int r;
+    uint32_t now;
 
     while (received < needed) {
-        int r = winsock_ce_recv(s_sock, dst + received, (int)(needed - received), 100);
+        r = sock_recv(s_sock, dst + received, (int)(needed - received), 100);
         if (r > 0) {
             received += r;
         } else if (r < 0) {
             return -1;
         } else {
-            DWORD now = GetTickCount();
+            now = get_tick_ms();
             if (now - start_time >= timeout_ms) {
                 return (received > 0) ? -1 : 0;
             }
@@ -171,30 +206,38 @@ static int recv_all(uint8_t *dst, size_t needed, uint32_t timeout_ms) {
 }
 
 static int ssh_recv_packet(uint8_t *out_payload, size_t max_payload, size_t *out_payload_len, uint32_t timeout_ms) {
+    static uint8_t raw_buf[4096];
+    static uint8_t check_buf[4096];
+    uint8_t hdr[4];
+    int r;
+    uint32_t packet_len;
+    size_t to_read;
+    uint8_t *mac_tag;
+    uint8_t expected_mac[32];
+    uint8_t pad_len;
+    size_t plen;
+
     if (s_sock == INVALID_SOCKET) return -1;
 
-    static uint8_t raw_buf[4096];
-
     /* 1. Read packet length (first 4 bytes) */
-    uint8_t hdr[4];
-    int r = recv_all(hdr, 4, timeout_ms);
+    r = recv_all(hdr, 4, timeout_ms);
     if (r <= 0) return r;
 
     if (s_encrypted) {
         ssh_cipher_crypt(&s_cipher_recv, hdr, 4);
     }
 
-    uint32_t packet_len = ((uint32_t)hdr[0] << 24) |
-                          ((uint32_t)hdr[1] << 16) |
-                          ((uint32_t)hdr[2] << 8) |
-                          ((uint32_t)hdr[3]);
+    packet_len = ((uint32_t)hdr[0] << 24) |
+                 ((uint32_t)hdr[1] << 16) |
+                 ((uint32_t)hdr[2] << 8) |
+                 ((uint32_t)hdr[3]);
 
     if (packet_len < 2 || packet_len > 35000) {
         return -1;
     }
 
     /* 2. Read remaining payload + padding + MAC */
-    size_t to_read = packet_len + (s_encrypted ? 32 : 0);
+    to_read = packet_len + (s_encrypted ? 32 : 0);
     if (to_read > sizeof(raw_buf)) {
         return -1;
     }
@@ -202,16 +245,14 @@ static int ssh_recv_packet(uint8_t *out_payload, size_t max_payload, size_t *out
     r = recv_all(raw_buf, to_read, timeout_ms);
     if (r <= 0) return -1;
 
-    uint8_t *mac_tag = raw_buf + packet_len;
+    mac_tag = raw_buf + packet_len;
 
     if (s_encrypted) {
         ssh_cipher_crypt(&s_cipher_recv, raw_buf, packet_len);
 
-        uint8_t check_buf[4096];
         memcpy(check_buf, hdr, 4);
         memcpy(check_buf + 4, raw_buf, packet_len);
 
-        uint8_t expected_mac[32];
         ssh_mac_compute(&s_mac_recv, s_recv_seq, check_buf, 4 + packet_len, expected_mac);
 
         if (memcmp(expected_mac, mac_tag, 32) != 0) {
@@ -221,12 +262,12 @@ static int ssh_recv_packet(uint8_t *out_payload, size_t max_payload, size_t *out
 
     s_recv_seq++;
 
-    uint8_t pad_len = raw_buf[0];
+    pad_len = raw_buf[0];
     if (1 + pad_len > packet_len) {
         return -1;
     }
 
-    size_t plen = packet_len - 1 - pad_len;
+    plen = packet_len - 1 - pad_len;
     if (plen > max_payload) plen = max_payload;
 
     memcpy(out_payload, raw_buf + 1, plen);
@@ -235,6 +276,96 @@ static int ssh_recv_packet(uint8_t *out_payload, size_t max_payload, size_t *out
 }
 
 bool ssh2_connect(const char *host, uint16_t port, const char *user, const char *pass) {
+    char status_buf[128];
+    char srv_banner[256];
+    size_t sb_len = 0;
+    uint32_t start_time;
+    char ch;
+    int r;
+    const char *cli_banner;
+    size_t cb_full_len;
+    char clean_cli_banner[64];
+    size_t cb_len;
+    uint8_t cli_kexinit[512];
+    ssh_buf_t ckb;
+    uint8_t cookie[16];
+    uint8_t srv_kexinit[2048];
+    size_t srv_kexinit_len = 0;
+    uint8_t client_priv[32];
+    uint8_t q_c[32];
+    uint8_t ecdh_init[64];
+    ssh_buf_t eib;
+    uint8_t reply[2048];
+    size_t reply_len = 0;
+    ssh_buf_t rb;
+    uint8_t rmtype;
+    const uint8_t *k_s = NULL, *q_s = NULL, *sig_blob = NULL;
+    size_t k_s_len = 0, q_s_len = 0, sig_len = 0;
+    uint8_t k_raw[32];
+    uint8_t k_mpint[64];
+    ssh_buf_t k_buf;
+    br_sha256_context h_ctx;
+    uint8_t v_c_hdr[4];
+    uint8_t v_s_hdr[4];
+    uint8_t i_c_hdr[4];
+    uint8_t i_s_hdr[4];
+    uint8_t k_s_hdr[4];
+    uint8_t q_c_hdr[4];
+    uint8_t q_s_hdr[4];
+    uint8_t exchange_h[32];
+    uint8_t nk;
+    uint8_t r_nk[64];
+    size_t r_nk_len = 0;
+    uint8_t iv_c2s[16], iv_s2c[16];
+    uint8_t key_c2s[16], key_s2c[16];
+    uint8_t mac_c2s[32], mac_s2c[32];
+    uint8_t sreq[64];
+    ssh_buf_t srb;
+    uint8_t saccept[256];
+    size_t saccept_len = 0;
+    uint8_t ureq[512];
+    ssh_buf_t ub;
+    uint8_t urep[512];
+    size_t urep_len = 0;
+    uint32_t t_auth_start;
+    bool auth_done = false;
+    uint8_t copen[128];
+    ssh_buf_t ob;
+    uint8_t cconf[512];
+    size_t cconf_len = 0;
+    bool channel_opened = false;
+    uint32_t t_chan_start;
+    uint8_t msg_type;
+    ssh_buf_t cb;
+    uint8_t cmsg;
+    uint32_t my_chan, server_chan, s_win, s_max;
+    uint8_t pty_req[128];
+    uint32_t t_pty;
+    uint8_t shell_req[64];
+    uint32_t t_sh;
+    uint8_t r_pty[128];
+    size_t r_pty_len = 0;
+    uint8_t r_sh[128];
+    size_t r_sh_len = 0;
+    ssh_buf_t bb;
+    uint8_t btype;
+    const uint8_t *bmsg = NULL;
+    size_t bmsg_len = 0;
+    char banner_buf[256];
+    size_t to_print;
+    ssh_buf_t fail_b;
+    uint8_t f_type;
+    uint32_t f_chan, f_reason;
+    const uint8_t *f_desc = NULL;
+    size_t f_desc_len = 0;
+    char err_buf[256];
+    ssh_buf_t gb;
+    uint8_t gtype;
+    const uint8_t *req_name = NULL;
+    size_t req_len = 0;
+    uint8_t want_reply = 0;
+    uint8_t fail;
+
     if (!host || host[0] == '\0') {
         notify_out("Error: Hostname cannot be empty.\r\n");
         return false;
@@ -243,12 +374,11 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
 
     ssh2_disconnect();
 
-    char status_buf[128];
     sprintf(status_buf, "Connecting to %s:%u...\r\n", host, port);
     notify_out(status_buf);
 
     s_status = SSH2_STATUS_CONNECTING;
-    s_sock = winsock_ce_connect(host, port, 5000);
+    s_sock = sock_connect(host, port, 5000);
     if (s_sock == INVALID_SOCKET) {
         notify_out("Error: TCP connection failed (host unreachable or connection refused).\r\n");
         s_status = SSH2_STATUS_ERROR;
@@ -256,12 +386,9 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 1. Receive Server Banner */
-    char srv_banner[256];
-    size_t sb_len = 0;
-    DWORD start_time = GetTickCount();
+    start_time = get_tick_ms();
     while (sb_len < sizeof(srv_banner) - 1) {
-        char ch;
-        int r = winsock_ce_recv(s_sock, &ch, 1, 100);
+        r = sock_recv(s_sock, &ch, 1, 100);
         if (r > 0) {
             srv_banner[sb_len++] = ch;
             if (ch == '\n') break;
@@ -270,7 +397,7 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
             ssh2_disconnect();
             return false;
         } else {
-            if (GetTickCount() - start_time > 5000) {
+            if (get_tick_ms() - start_time > 5000) {
                 notify_out("Error: Server banner timed out.\r\n");
                 ssh2_disconnect();
                 return false;
@@ -286,29 +413,25 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     notify_out(status_buf);
 
     /* 2. Send Client Banner */
-    const char *cli_banner = SSH_CLIENT_BANNER;
-    size_t cb_full_len = strlen(cli_banner);
-    if (winsock_ce_send(s_sock, cli_banner, (int)cb_full_len) <= 0) {
+    cli_banner = SSH_CLIENT_BANNER;
+    cb_full_len = strlen(cli_banner);
+    if (sock_send(s_sock, cli_banner, (int)cb_full_len) <= 0) {
         notify_out("Error: Failed to send client banner.\r\n");
         ssh2_disconnect();
         return false;
     }
 
-    char clean_cli_banner[64];
     strncpy(clean_cli_banner, cli_banner, sizeof(clean_cli_banner) - 1);
     clean_cli_banner[sizeof(clean_cli_banner) - 1] = '\0';
-    size_t cb_len = strlen(clean_cli_banner);
+    cb_len = strlen(clean_cli_banner);
     while (cb_len > 0 && (clean_cli_banner[cb_len - 1] == '\r' || clean_cli_banner[cb_len - 1] == '\n')) {
         clean_cli_banner[--cb_len] = '\0';
     }
 
     /* 3. Send Client KEXINIT */
     notify_out("Initiating key exchange (Curve25519 ECDH + AES128-CTR)...\r\n");
-    uint8_t cli_kexinit[512];
-    ssh_buf_t ckb;
     ssh_buf_init(&ckb, cli_kexinit, sizeof(cli_kexinit));
     ssh_put_u8(&ckb, SSH_MSG_KEXINIT);
-    uint8_t cookie[16];
     ssh_random_bytes(cookie, sizeof(cookie));
     ssh_put_raw(&ckb, cookie, sizeof(cookie));
     ssh_put_str(&ckb, "curve25519-sha256,curve25519-sha256@libssh.org");
@@ -331,8 +454,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 4. Receive Server KEXINIT */
-    uint8_t srv_kexinit[2048];
-    size_t srv_kexinit_len = 0;
     if (ssh_recv_packet(srv_kexinit, sizeof(srv_kexinit), &srv_kexinit_len, 5000) <= 0) {
         notify_out("Error: Failed to receive server KEXINIT.\r\n");
         ssh2_disconnect();
@@ -345,13 +466,9 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 5. Generate Client Ephemeral Key & Send SSH_MSG_KEX_ECDH_INIT (30) */
-    uint8_t client_priv[32];
     ssh_random_bytes(client_priv, sizeof(client_priv));
-    uint8_t q_c[32];
     ssh_curve25519_mulgen(q_c, client_priv);
 
-    uint8_t ecdh_init[64];
-    ssh_buf_t eib;
     ssh_buf_init(&eib, ecdh_init, sizeof(ecdh_init));
     ssh_put_u8(&eib, SSH_MSG_KEX_ECDH_INIT);
     ssh_put_string(&eib, q_c, 32);
@@ -363,8 +480,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 6. Receive SSH_MSG_KEX_ECDH_REPLY (31) */
-    uint8_t reply[2048];
-    size_t reply_len = 0;
     if (ssh_recv_packet(reply, sizeof(reply), &reply_len, 5000) <= 0) {
         notify_out("Error: Failed to receive ECDH_REPLY.\r\n");
         ssh2_disconnect();
@@ -376,12 +491,8 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    ssh_buf_t rb;
     ssh_buf_init_read(&rb, reply, reply_len);
-    uint8_t rmtype;
     ssh_get_u8(&rb, &rmtype);
-    const uint8_t *k_s, *q_s, *sig_blob;
-    size_t k_s_len, q_s_len, sig_len;
     if (!ssh_get_string(&rb, &k_s, &k_s_len) ||
         !ssh_get_string(&rb, &q_s, &q_s_len) ||
         !ssh_get_string(&rb, &sig_blob, &sig_len) ||
@@ -392,63 +503,53 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 7. Compute Shared Secret K (Curve25519) */
-    uint8_t k_raw[32];
     ssh_curve25519_mul(k_raw, q_s, client_priv);
 
-    uint8_t k_mpint[64];
-    ssh_buf_t k_buf;
     ssh_buf_init(&k_buf, k_mpint, sizeof(k_mpint));
     ssh_put_mpint(&k_buf, k_raw, 32);
 
     /* 8. Compute Exchange Hash H */
-    br_sha256_context h_ctx;
     br_sha256_init(&h_ctx);
 
-    uint8_t v_c_hdr[4];
     v_c_hdr[0] = (uint8_t)(cb_len >> 24); v_c_hdr[1] = (uint8_t)(cb_len >> 16);
     v_c_hdr[2] = (uint8_t)(cb_len >> 8);  v_c_hdr[3] = (uint8_t)cb_len;
     br_sha256_update(&h_ctx, v_c_hdr, 4);
     br_sha256_update(&h_ctx, clean_cli_banner, cb_len);
 
-    uint8_t v_s_hdr[4];
     v_s_hdr[0] = (uint8_t)(sb_len >> 24); v_s_hdr[1] = (uint8_t)(sb_len >> 16);
     v_s_hdr[2] = (uint8_t)(sb_len >> 8);  v_s_hdr[3] = (uint8_t)sb_len;
     br_sha256_update(&h_ctx, v_s_hdr, 4);
     br_sha256_update(&h_ctx, srv_banner, sb_len);
 
-    uint8_t i_c_hdr[4];
     i_c_hdr[0] = (uint8_t)(ckb.len >> 24); i_c_hdr[1] = (uint8_t)(ckb.len >> 16);
     i_c_hdr[2] = (uint8_t)(ckb.len >> 8);  i_c_hdr[3] = (uint8_t)ckb.len;
     br_sha256_update(&h_ctx, i_c_hdr, 4);
     br_sha256_update(&h_ctx, ckb.data, ckb.len);
 
-    uint8_t i_s_hdr[4];
     i_s_hdr[0] = (uint8_t)(srv_kexinit_len >> 24); i_s_hdr[1] = (uint8_t)(srv_kexinit_len >> 16);
     i_s_hdr[2] = (uint8_t)(srv_kexinit_len >> 8);  i_s_hdr[3] = (uint8_t)srv_kexinit_len;
     br_sha256_update(&h_ctx, i_s_hdr, 4);
     br_sha256_update(&h_ctx, srv_kexinit, srv_kexinit_len);
 
-    uint8_t k_s_hdr[4];
     k_s_hdr[0] = (uint8_t)(k_s_len >> 24); k_s_hdr[1] = (uint8_t)(k_s_len >> 16);
     k_s_hdr[2] = (uint8_t)(k_s_len >> 8);  k_s_hdr[3] = (uint8_t)k_s_len;
     br_sha256_update(&h_ctx, k_s_hdr, 4);
     br_sha256_update(&h_ctx, k_s, k_s_len);
 
-    uint8_t q_c_hdr[4] = {0, 0, 0, 32};
+    q_c_hdr[0] = 0; q_c_hdr[1] = 0; q_c_hdr[2] = 0; q_c_hdr[3] = 32;
     br_sha256_update(&h_ctx, q_c_hdr, 4);
     br_sha256_update(&h_ctx, q_c, 32);
 
-    uint8_t q_s_hdr[4] = {0, 0, 0, 32};
+    q_s_hdr[0] = 0; q_s_hdr[1] = 0; q_s_hdr[2] = 0; q_s_hdr[3] = 32;
     br_sha256_update(&h_ctx, q_s_hdr, 4);
     br_sha256_update(&h_ctx, q_s, 32);
 
     br_sha256_update(&h_ctx, k_buf.data, k_buf.len);
 
-    uint8_t exchange_h[32];
     br_sha256_out(&h_ctx, exchange_h);
 
     /* 9. Send SSH_MSG_NEWKEYS (21) */
-    uint8_t nk = SSH_MSG_NEWKEYS;
+    nk = SSH_MSG_NEWKEYS;
     if (ssh_send_packet(&nk, 1) <= 0) {
         notify_out("Error: Failed to send NEWKEYS.\r\n");
         ssh2_disconnect();
@@ -456,8 +557,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 10. Receive SSH_MSG_NEWKEYS (21) */
-    uint8_t r_nk[64];
-    size_t r_nk_len = 0;
     if (ssh_recv_packet(r_nk, sizeof(r_nk), &r_nk_len, 5000) <= 0) {
         notify_out("Error: Failed to receive NEWKEYS.\r\n");
         ssh2_disconnect();
@@ -470,10 +569,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 11. Key Derivation (RFC 4253 §7.2) */
-    uint8_t iv_c2s[16], iv_s2c[16];
-    uint8_t key_c2s[16], key_s2c[16];
-    uint8_t mac_c2s[32], mac_s2c[32];
-
     ssh_kdf(k_buf.data, k_buf.len, exchange_h, 32, 'A', exchange_h, 32, iv_c2s, 16);
     ssh_kdf(k_buf.data, k_buf.len, exchange_h, 32, 'B', exchange_h, 32, iv_s2c, 16);
     ssh_kdf(k_buf.data, k_buf.len, exchange_h, 32, 'C', exchange_h, 32, key_c2s, 16);
@@ -489,8 +584,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
 
     /* 12. Request Service: ssh-userauth */
     notify_out("Requesting authentication service...\r\n");
-    uint8_t sreq[64];
-    ssh_buf_t srb;
     ssh_buf_init(&srb, sreq, sizeof(sreq));
     ssh_put_u8(&srb, SSH_MSG_SERVICE_REQUEST);
     ssh_put_str(&srb, "ssh-userauth");
@@ -500,8 +593,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    uint8_t saccept[256];
-    size_t saccept_len = 0;
     if (ssh_recv_packet(saccept, sizeof(saccept), &saccept_len, 5000) <= 0) {
         notify_out("Error: Failed to receive SERVICE_ACCEPT.\r\n");
         ssh2_disconnect();
@@ -518,8 +609,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     sprintf(status_buf, "Authenticating user '%s'...\r\n", user ? user : "root");
     notify_out(status_buf);
 
-    uint8_t ureq[512];
-    ssh_buf_t ub;
     ssh_buf_init(&ub, ureq, sizeof(ureq));
     ssh_put_u8(&ub, SSH_MSG_USERAUTH_REQUEST);
     ssh_put_str(&ub, user ? user : "root");
@@ -534,26 +623,22 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    uint8_t urep[512];
-    size_t urep_len = 0;
-    DWORD t_auth_start = GetTickCount();
-    bool auth_done = false;
+    urep_len = 0;
+    t_auth_start = get_tick_ms();
+    auth_done = false;
 
-    while (GetTickCount() - t_auth_start < 10000) {
+    while (get_tick_ms() - t_auth_start < 10000) {
         urep_len = 0;
-        int r = ssh_recv_packet(urep, sizeof(urep), &urep_len, 2500);
+        r = ssh_recv_packet(urep, sizeof(urep), &urep_len, 2500);
         if (r <= 0) continue;
 
         if (urep[0] == SSH_MSG_USERAUTH_BANNER) {
-            ssh_buf_t bb;
             ssh_buf_init_read(&bb, urep, urep_len);
-            uint8_t btype;
-            const uint8_t *bmsg = NULL;
-            size_t bmsg_len = 0;
+            bmsg = NULL;
+            bmsg_len = 0;
             ssh_get_u8(&bb, &btype);
             if (ssh_get_string(&bb, &bmsg, &bmsg_len) && bmsg && bmsg_len > 0) {
-                char banner_buf[256];
-                size_t to_print = (bmsg_len < sizeof(banner_buf) - 3) ? bmsg_len : (sizeof(banner_buf) - 3);
+                to_print = (bmsg_len < sizeof(banner_buf) - 3) ? bmsg_len : (sizeof(banner_buf) - 3);
                 memcpy(banner_buf, bmsg, to_print);
                 banner_buf[to_print] = '\0';
                 notify_out(banner_buf);
@@ -585,8 +670,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
 
     /* 14. Open Session Channel */
     notify_out("Opening terminal session channel...\r\n");
-    uint8_t copen[128];
-    ssh_buf_t ob;
     ssh_buf_init(&ob, copen, sizeof(copen));
     ssh_put_u8(&ob, SSH_MSG_CHANNEL_OPEN);
     ssh_put_str(&ob, "session");
@@ -600,50 +683,42 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    uint8_t cconf[512];
-    size_t cconf_len = 0;
-    bool channel_opened = false;
-    DWORD t_chan_start = GetTickCount();
+    cconf_len = 0;
+    channel_opened = false;
+    t_chan_start = get_tick_ms();
 
-    while (GetTickCount() - t_chan_start < 10000) {
+    while (get_tick_ms() - t_chan_start < 10000) {
         cconf_len = 0;
-        int r = ssh_recv_packet(cconf, sizeof(cconf), &cconf_len, 2000);
+        r = ssh_recv_packet(cconf, sizeof(cconf), &cconf_len, 2000);
         if (r <= 0) continue;
 
-        uint8_t msg_type = cconf[0];
+        msg_type = cconf[0];
         if (msg_type == SSH_MSG_CHANNEL_OPEN_CONFIRMATION) {
             channel_opened = true;
             break;
         } else if (msg_type == SSH_MSG_CHANNEL_OPEN_FAILURE) {
-            ssh_buf_t fail_b;
             ssh_buf_init_read(&fail_b, cconf, cconf_len);
-            uint8_t f_type;
-            uint32_t f_chan, f_reason;
-            const uint8_t *f_desc = NULL;
-            size_t f_desc_len = 0;
+            f_desc = NULL;
+            f_desc_len = 0;
             ssh_get_u8(&fail_b, &f_type);
             ssh_get_u32(&fail_b, &f_chan);
             ssh_get_u32(&fail_b, &f_reason);
             ssh_get_string(&fail_b, &f_desc, &f_desc_len);
-            char err_buf[256];
-            snprintf(err_buf, sizeof(err_buf), "Error: Session channel rejected by server (code %u: %.*s)\r\n",
-                     (unsigned)f_reason, (int)(f_desc_len < 160 ? f_desc_len : 160),
-                     f_desc ? (const char *)f_desc : "rejected");
+            sprintf(err_buf, "Error: Session channel rejected by server (code %u)\r\n",
+                    (unsigned)f_reason);
             notify_out(err_buf);
             ssh2_disconnect();
             return false;
         } else if (msg_type == SSH_MSG_GLOBAL_REQUEST) {
             /* OpenSSH often sends hostkeys-00@openssh.com here */
-            ssh_buf_t gb;
             ssh_buf_init_read(&gb, cconf, cconf_len);
-            uint8_t gtype;
-            const uint8_t *req_name = NULL;
-            size_t req_len = 0;
-            uint8_t want_reply = 0;
+            req_name = NULL;
+            req_len = 0;
+            want_reply = 0;
             ssh_get_u8(&gb, &gtype);
             if (ssh_get_string(&gb, &req_name, &req_len) && ssh_get_u8(&gb, &want_reply)) {
                 if (want_reply) {
-                    uint8_t fail = SSH_MSG_REQUEST_FAILURE;
+                    fail = SSH_MSG_REQUEST_FAILURE;
                     ssh_send_packet(&fail, 1);
                 }
             }
@@ -662,11 +737,8 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
         return false;
     }
 
-    ssh_buf_t cb;
     ssh_buf_init_read(&cb, cconf, cconf_len);
-    uint8_t cmsg;
     ssh_get_u8(&cb, &cmsg);
-    uint32_t my_chan, server_chan, s_win, s_max;
     ssh_get_u32(&cb, &my_chan);
     ssh_get_u32(&cb, &server_chan);
     ssh_get_u32(&cb, &s_win);
@@ -676,7 +748,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     s_server_chan = server_chan;
 
     /* 15. Request PTY (vt100, 80x21) */
-    uint8_t pty_req[128];
     ssh_buf_init(&ob, pty_req, sizeof(pty_req));
     ssh_put_u8(&ob, SSH_MSG_CHANNEL_REQUEST);
     ssh_put_u32(&ob, s_server_chan);
@@ -691,18 +762,18 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     ssh_send_packet(ob.data, ob.len);
 
     /* Wait for PTY response (handle global requests/debug if any) */
-    DWORD t_pty = GetTickCount();
-    while (GetTickCount() - t_pty < 3000) {
-        uint8_t r_pty[128];
-        size_t r_pty_len = 0;
+    t_pty = get_tick_ms();
+    while (get_tick_ms() - t_pty < 3000) {
+        r_pty_len = 0;
         if (ssh_recv_packet(r_pty, sizeof(r_pty), &r_pty_len, 1000) <= 0) continue;
         if (r_pty[0] == SSH_MSG_GLOBAL_REQUEST) {
-            ssh_buf_t gb;
             ssh_buf_init_read(&gb, r_pty, r_pty_len);
-            uint8_t gt; const uint8_t *rn; size_t rl; uint8_t wr = 0;
-            ssh_get_u8(&gb, &gt);
-            if (ssh_get_string(&gb, &rn, &rl) && ssh_get_u8(&gb, &wr) && wr) {
-                uint8_t fail = SSH_MSG_REQUEST_FAILURE;
+            req_name = NULL;
+            req_len = 0;
+            want_reply = 0;
+            ssh_get_u8(&gb, &gtype);
+            if (ssh_get_string(&gb, &req_name, &req_len) && ssh_get_u8(&gb, &want_reply) && want_reply) {
+                fail = SSH_MSG_REQUEST_FAILURE;
                 ssh_send_packet(&fail, 1);
             }
             continue;
@@ -713,7 +784,6 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     }
 
     /* 16. Request Shell */
-    uint8_t shell_req[64];
     ssh_buf_init(&ob, shell_req, sizeof(shell_req));
     ssh_put_u8(&ob, SSH_MSG_CHANNEL_REQUEST);
     ssh_put_u32(&ob, s_server_chan);
@@ -721,18 +791,18 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
     ssh_put_u8(&ob, 1);
     ssh_send_packet(ob.data, ob.len);
 
-    DWORD t_sh = GetTickCount();
-    while (GetTickCount() - t_sh < 3000) {
-        uint8_t r_sh[128];
-        size_t r_sh_len = 0;
+    t_sh = get_tick_ms();
+    while (get_tick_ms() - t_sh < 3000) {
+        r_sh_len = 0;
         if (ssh_recv_packet(r_sh, sizeof(r_sh), &r_sh_len, 1000) <= 0) continue;
         if (r_sh[0] == SSH_MSG_GLOBAL_REQUEST) {
-            ssh_buf_t gb;
             ssh_buf_init_read(&gb, r_sh, r_sh_len);
-            uint8_t gt; const uint8_t *rn; size_t rl; uint8_t wr = 0;
-            ssh_get_u8(&gb, &gt);
-            if (ssh_get_string(&gb, &rn, &rl) && ssh_get_u8(&gb, &wr) && wr) {
-                uint8_t fail = SSH_MSG_REQUEST_FAILURE;
+            req_name = NULL;
+            req_len = 0;
+            want_reply = 0;
+            ssh_get_u8(&gb, &gtype);
+            if (ssh_get_string(&gb, &req_name, &req_len) && ssh_get_u8(&gb, &want_reply) && want_reply) {
+                fail = SSH_MSG_REQUEST_FAILURE;
                 ssh_send_packet(&fail, 1);
             }
             continue;
@@ -748,17 +818,21 @@ bool ssh2_connect(const char *host, uint16_t port, const char *user, const char 
 }
 
 bool ssh2_poll(void) {
+    uint8_t in_buf[4096];
+    size_t in_len = 0;
+    int pr;
+    ssh_buf_t in_b;
+    uint8_t itype;
+
     if (s_status != SSH2_STATUS_CONNECTED || s_sock == INVALID_SOCKET) {
         return false;
     }
 
-    if (!winsock_ce_has_data(s_sock)) {
+    if (!sock_has_data(s_sock)) {
         return false;
     }
 
-    uint8_t in_buf[4096];
-    size_t in_len = 0;
-    int pr = ssh_recv_packet(in_buf, sizeof(in_buf), &in_len, 20);
+    pr = ssh_recv_packet(in_buf, sizeof(in_buf), &in_len, 20);
     if (pr <= 0 || in_len == 0) {
         if (pr < 0) {
             notify_out("\r\n[Connection lost or host disconnected]\r\n");
@@ -768,28 +842,27 @@ bool ssh2_poll(void) {
         return false;
     }
 
-    ssh_buf_t in_b;
     ssh_buf_init_read(&in_b, in_buf, in_len);
-    uint8_t itype;
     ssh_get_u8(&in_b, &itype);
 
     if (itype == SSH_MSG_CHANNEL_DATA || itype == SSH_MSG_CHANNEL_EXTENDED_DATA) {
         uint32_t chan;
+        const uint8_t *text = NULL;
+        size_t text_len = 0;
+        uint8_t wadj[16];
+        ssh_buf_t wb;
+
         ssh_get_u32(&in_b, &chan);
         if (itype == SSH_MSG_CHANNEL_EXTENDED_DATA) {
             uint32_t data_type_code;
             ssh_get_u32(&in_b, &data_type_code);
         }
-        const uint8_t *text;
-        size_t text_len;
         if (ssh_get_string(&in_b, &text, &text_len) && text_len > 0) {
             if (s_output_cb) {
                 s_output_cb((const char *)text, text_len);
             }
 
             /* Replenish channel window */
-            uint8_t wadj[16];
-            ssh_buf_t wb;
             ssh_buf_init(&wb, wadj, sizeof(wb));
             ssh_put_u8(&wb, SSH_MSG_CHANNEL_WINDOW_ADJUST);
             ssh_put_u32(&wb, s_server_chan);
@@ -802,9 +875,9 @@ bool ssh2_poll(void) {
         ssh2_disconnect();
         return true;
     } else if (itype == SSH_MSG_GLOBAL_REQUEST) {
-        const uint8_t *req_name;
-        size_t req_len;
-        uint8_t want_reply;
+        const uint8_t *req_name = NULL;
+        size_t req_len = 0;
+        uint8_t want_reply = 0;
         if (ssh_get_string(&in_b, &req_name, &req_len) && ssh_get_u8(&in_b, &want_reply)) {
             if (want_reply) {
                 uint8_t fail = SSH_MSG_REQUEST_FAILURE;
@@ -813,9 +886,9 @@ bool ssh2_poll(void) {
         }
     } else if (itype == SSH_MSG_CHANNEL_REQUEST) {
         uint32_t chan;
-        const uint8_t *req_name;
-        size_t req_len;
-        uint8_t want_reply;
+        const uint8_t *req_name = NULL;
+        size_t req_len = 0;
+        uint8_t want_reply = 0;
         if (ssh_get_u32(&in_b, &chan) && ssh_get_string(&in_b, &req_name, &req_len) && ssh_get_u8(&in_b, &want_reply)) {
             if (want_reply) {
                 uint8_t succ[8];
@@ -832,12 +905,13 @@ bool ssh2_poll(void) {
 }
 
 bool ssh2_send_data(const void *data, size_t len) {
+    uint8_t pkt[2048];
+    ssh_buf_t db;
+
     if (s_status != SSH2_STATUS_CONNECTED || s_sock == INVALID_SOCKET) {
         return false;
     }
 
-    uint8_t pkt[2048];
-    ssh_buf_t db;
     ssh_buf_init(&db, pkt, sizeof(pkt));
     ssh_put_u8(&db, SSH_MSG_CHANNEL_DATA);
     ssh_put_u32(&db, s_server_chan);
@@ -847,13 +921,14 @@ bool ssh2_send_data(const void *data, size_t len) {
 }
 
 void ssh2_set_terminal_size(int cols, int rows) {
+    uint8_t wchg[64];
+    ssh_buf_t wb;
+
     s_term_cols = cols;
     s_term_rows = rows;
     if (s_status == SSH2_STATUS_CONNECTED && s_sock != INVALID_SOCKET) {
         /* Send window-change request */
-        uint8_t wchg[64];
-        ssh_buf_t wb;
-        ssh_buf_init(&wb, wchg, sizeof(wchg));
+        ssh_buf_init(&wb, wchg, sizeof(wb));
         ssh_put_u8(&wb, SSH_MSG_CHANNEL_REQUEST);
         ssh_put_u32(&wb, s_server_chan);
         ssh_put_str(&wb, "window-change");

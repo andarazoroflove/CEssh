@@ -47,16 +47,19 @@ bool ssh_put_str(ssh_buf_t *b, const char *s) {
 }
 
 bool ssh_put_mpint(ssh_buf_t *b, const uint8_t *be_bytes, size_t len) {
-    /* Skip leading zeroes */
     size_t i = 0;
+    const uint8_t *val;
+    size_t val_len;
+
+    /* Skip leading zeroes */
     while (i < len && be_bytes[i] == 0) i++;
     if (i == len) {
         /* Value is zero: 00 00 00 00 */
         return ssh_put_u32(b, 0);
     }
 
-    const uint8_t *val = be_bytes + i;
-    size_t val_len = len - i;
+    val = be_bytes + i;
+    val_len = len - i;
 
     /* If high bit set, prefix with 0x00 */
     if (val[0] & 0x80) {

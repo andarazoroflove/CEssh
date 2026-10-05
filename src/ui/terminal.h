@@ -5,8 +5,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define TERM_COLS 80
-#define TERM_ROWS 21
+#define TERM_MAX_COLS 80
+#define TERM_MAX_ROWS 64
+
+#define TERM_COLS term_get_cols()
+#define TERM_ROWS term_get_rows()
 
 /* Color Palette */
 #define COLOR_WHITE   0x00FFFFFF
@@ -23,6 +26,9 @@ typedef struct {
 } term_cell_t;
 
 void term_init(void);
+void term_set_size(int cols, int rows);
+int  term_get_cols(void);
+int  term_get_rows(void);
 void term_clear(void);
 void term_putc(char c);
 void term_write(const char *data, size_t len);

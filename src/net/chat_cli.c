@@ -337,8 +337,10 @@ void chat_cli_run(const char *server_arg, const char *nick_arg) {
             term_render_cell(c, 1, '-', COLOR_GRAY, COLOR_WHITE, 0);
         }
 
-        /* 4. Render Message Area (Rows 2..19, 18 rows) */
-        const int msg_rows = 18;
+        /* 4. Render Message Area (Rows 2..(term_rows - 2)) */
+        const int term_rows = TERM_ROWS;
+        const int msg_rows = (term_rows > 3) ? (term_rows - 3) : 1;
+        const int input_row = term_rows - 1;
         int start_idx = 0;
         if (s_chat_line_count > msg_rows) {
             start_idx = s_chat_line_count - msg_rows;
@@ -361,7 +363,7 @@ void chat_cli_run(const char *server_arg, const char *nick_arg) {
             }
         }
 
-        /* 5. Render Input Prompt Bar (Row 20) */
+        /* 5. Render Input Prompt Bar (Row input_row) */
         char pfx[32];
         snprintf(pfx, sizeof(pfx), "[%s]> ", s_irc_chan);
         size_t pfx_len = strlen(pfx);
@@ -376,13 +378,13 @@ void chat_cli_run(const char *server_arg, const char *nick_arg) {
             } else if (c - (int)pfx_len < (int)input_len) {
                 ch = input[c - (int)pfx_len];
             }
-            term_render_cell(c, 20, ch, fg, bg, 0);
+            term_render_cell(c, input_row, ch, fg, bg, 0);
         }
 
         /* Set cursor */
         int cur_x = (int)pfx_len + (int)input_pos;
         if (cur_x >= TERM_COLS) cur_x = TERM_COLS - 1;
-        term_set_cursor(cur_x, 20);
+        term_set_cursor(cur_x, input_row);
 
         win_main_flip();
 

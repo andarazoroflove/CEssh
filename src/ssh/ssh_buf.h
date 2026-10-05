@@ -2,9 +2,17 @@
 #define CESSH_SSH_BUF_H
 
 #include <stdint.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+
+#ifdef PALMOS
+#include <PalmOS.h>
+#ifndef bool
+#define bool Boolean
+#endif
+#else
+#include <stdbool.h>
+#endif
 
 typedef struct {
     uint8_t *data;
